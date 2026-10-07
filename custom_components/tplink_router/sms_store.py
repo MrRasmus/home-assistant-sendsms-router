@@ -36,7 +36,7 @@ class SmsStore:
         max_messages: int = DEFAULT_MAX_MESSAGES,
     ) -> None:
         """Initialize the SMS store."""
-        self._store: Store[dict] = Store(
+        self._store: Store[dict[str, list[SmsLogEntry]]] = Store(
             hass,
             STORAGE_VERSION,
             f"{STORAGE_KEY_PREFIX}.{entry_id}",
