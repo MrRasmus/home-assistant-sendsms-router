@@ -317,6 +317,71 @@ class TPLinkRouterCoordinator(DataUpdateCoordinator):
         await self._run_stored_sms_action(message_id, "delete_sms", "delete")
         await self.async_request_refresh()
 
+    def _set_sms_read_router(self, sms: SMS) -> None:
+        """Mark an MR-series SMS read using the same ACT sequence as its web UI.
+
+        The MR200 v6 web interface does not send a bare SET on
+        LTE_SMS_RECVMSGENTRY. Its read-message page batches a GET of
+        LTE_SMS_RECVMSGBOX together with the SET that clears ``unread``.
+        tplinkrouterc6u 5.36.0 currently sends only the SET. On the tested
+        MR200 v6 firmware that can leave SMS reception stuck until the HA
+        integration/session is unloaded.
+
+        Use the web-UI-compatible sequence for TPLinkMR* clients and retain
+        the public library method as a fallback for other router families.
+        """
+        act_item = getattr(self.router, "ActItem", None)
+        req_act = getattr(self.router, "req_act", None)
+        is_mr_client = self.router.__class__.__name__.startswith("TPLinkMR")
+
+        if is_mr_client and act_item is not None and callable(req_act):
+            req_act(
+                [
+                    act_item(
+                        act_item.GET,
+                        "LTE_SMS_RECVMSGBOX",
+                        attrs=["totalNumber", "amountPerPage"],
+                    ),
+                    act_item(
+                        act_item.SET,
+                        "LTE_SMS_RECVMSGENTRY",
+                        f"{sms.id},0,0,0,0,0",
+                        attrs=["unread=0"],
+                    ),
+                ]
+            )
+            return
+
+        self.router.set_sms_read(sms)
+
+    async def _run_sms_log_entry_action(
+        self,
+        log_entry: SmsLogEntry,
+        router_method_name: str,
+        action_name: str,
+    ) -> bool:
+        """Re-fetch the inbox, resolve the live page stack, then run an action."""
+        router_method = getattr(self.router, router_method_name, None)
+        if router_method is None or not hasattr(self.router, "get_sms"):
+            raise HomeAssistantError(f"This router does not support SMS {action_name}")
+
+        def callback() -> bool:
+            # SMS ids in tplinkrouterc6u are page-relative stack positions.
+            # Always refresh page 1 in this same authorized session before
+            # using that id for a router-side write.
+            sms_list = self.router.get_sms()
+            sms = self._find_router_sms(sms_list, log_entry)
+            if sms is None:
+                return False
+
+            if router_method_name == "set_sms_read":
+                self._set_sms_read_router(sms)
+            else:
+                router_method(sms)
+            return True
+
+        return await self._run_router_request(callback)
+
     async def _run_stored_sms_action(
         self,
         message_id: str,
@@ -333,19 +398,9 @@ class TPLinkRouterCoordinator(DataUpdateCoordinator):
         if log_entry["direction"] != "in":
             raise HomeAssistantError("Only received SMS messages exist in the router inbox")
 
-        router_method = getattr(self.router, router_method_name, None)
-        if router_method is None or not hasattr(self.router, "get_sms"):
-            raise HomeAssistantError(f"This router does not support SMS {action_name}")
-
-        def callback() -> bool:
-            sms_list = self.router.get_sms()
-            sms = self._find_router_sms(sms_list, log_entry)
-            if sms is None:
-                return False
-            router_method(sms)
-            return True
-
-        if not await self._run_router_request(callback):
+        if not await self._run_sms_log_entry_action(
+            log_entry, router_method_name, action_name
+        ):
             raise HomeAssistantError(
                 "The SMS is no longer present in the router's current inbox"
             )
@@ -375,7 +430,7 @@ class TPLinkRouterCoordinator(DataUpdateCoordinator):
 
         for sms in self.new_sms:
             try:
-                await self.sms_store.async_add_message(
+                stored_entry = await self.sms_store.async_add_message(
                     "in",
                     sms.sender,
                     sms.content,
@@ -395,9 +450,17 @@ class TPLinkRouterCoordinator(DataUpdateCoordinator):
                 continue
 
             try:
-                await self._run_router_request(
-                    lambda sms=sms: self.router.set_sms_read(sms)
+                # Do not reuse the page-relative sms.id obtained by the previous
+                # coordinator poll. Re-fetch the inbox in the write session, find
+                # the stored message again, and only then perform the web-UI-like
+                # mark-read operation.
+                marked = await self._run_sms_log_entry_action(
+                    stored_entry, "set_sms_read", "mark as read"
                 )
+                if not marked:
+                    self.logger.warning(
+                        "TPLink Router could not re-find received SMS to mark it read"
+                    )
             except Exception:
                 # The SMS is already safe in our local store; a router-side read
                 # failure should not fail the entire coordinator update.
