@@ -1,3 +1,4 @@
+
 import logging
 import voluptuous as vol
 from typing import Any
@@ -9,6 +10,7 @@ from .const import (
     DOMAIN, DEFAULT_USER, DEFAULT_HOST, CONF_CLIENT_CLASS,
     CONF_SUPPORT_VPN, CONF_SUPPORT_TRACKER, CONF_TRACKER_AS_DEVICE,
     CONF_SUPPORT_DHCP_RESERVATIONS, CONF_SUPPORT_SERVING_CELLS,
+    CONF_SMS_AUTO_MARK_READ, DEFAULT_SMS_AUTO_MARK_READ,
     CONF_SCAN_RETRIES, CONF_SCAN_BACKOFF,
     CONF_SCAN_PAUSE, CONF_OFFLINE_TIMEOUT, DEFAULT_SCAN_RETRIES, DEFAULT_SCAN_BACKOFF,
     DEFAULT_SCAN_PAUSE, DEFAULT_OFFLINE_TIMEOUT, MAX_SCAN_RETRIES, MAX_SCAN_BACKOFF,
@@ -155,6 +157,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_SUPPORT_SERVING_CELLS,
                         default=self.data_initial.get(CONF_SUPPORT_SERVING_CELLS, False),
                     ): cv.boolean,
+                    vol.Required(
+                        CONF_SMS_AUTO_MARK_READ,
+                        default=self.data_initial.get(
+                            CONF_SMS_AUTO_MARK_READ, DEFAULT_SMS_AUTO_MARK_READ
+                        ),
+                    ): cv.boolean,
                 },
                 extra=vol.ALLOW_EXTRA,
             ),
@@ -229,6 +237,10 @@ class OptionsFlow(config_entries.OptionsFlowWithConfigEntry):
                 vol.Required(
                     CONF_SUPPORT_SERVING_CELLS,
                     default=data.get(CONF_SUPPORT_SERVING_CELLS, False),
+                ): cv.boolean,
+                vol.Required(
+                    CONF_SMS_AUTO_MARK_READ,
+                    default=data.get(CONF_SMS_AUTO_MARK_READ, DEFAULT_SMS_AUTO_MARK_READ),
                 ): cv.boolean,
             },
             extra=vol.ALLOW_EXTRA

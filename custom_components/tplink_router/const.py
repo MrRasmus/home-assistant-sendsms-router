@@ -1,3 +1,4 @@
+
 DEFAULT_NAME = "TP-Link Router"
 DOMAIN = "tplink_router"
 CONF_CLIENT_CLASS = "client_class"
@@ -6,6 +7,7 @@ CONF_SUPPORT_TRACKER = "support_tracker"
 CONF_TRACKER_AS_DEVICE = "tracker_as_device"
 CONF_SUPPORT_DHCP_RESERVATIONS = "support_dhcp_reservations"
 CONF_SUPPORT_SERVING_CELLS = "support_serving_cells"
+CONF_SMS_AUTO_MARK_READ = "sms_auto_mark_read"
 CONF_SCAN_RETRIES = "scan_retries"
 CONF_SCAN_BACKOFF = "scan_backoff"
 CONF_SCAN_PAUSE = "scan_pause"
@@ -16,6 +18,7 @@ DEFAULT_SCAN_RETRIES = 3
 DEFAULT_SCAN_BACKOFF = 1.0
 DEFAULT_SCAN_PAUSE = 20
 DEFAULT_OFFLINE_TIMEOUT = 0
+DEFAULT_SMS_AUTO_MARK_READ = True
 MAX_SCAN_RETRIES = 10
 MAX_SCAN_BACKOFF = 30.0
 MAX_SCAN_PAUSE = 1440

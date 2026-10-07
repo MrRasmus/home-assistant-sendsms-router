@@ -20,6 +20,7 @@ from .const import (
     CONF_SUPPORT_TRACKER,
     CONF_SUPPORT_DHCP_RESERVATIONS,
     CONF_SUPPORT_SERVING_CELLS,
+    CONF_SMS_AUTO_MARK_READ,
     CONF_SCAN_RETRIES,
     CONF_SCAN_BACKOFF,
     CONF_SCAN_PAUSE,
@@ -28,6 +29,7 @@ from .const import (
     DEFAULT_SCAN_BACKOFF,
     DEFAULT_SCAN_PAUSE,
     DEFAULT_OFFLINE_TIMEOUT,
+    DEFAULT_SMS_AUTO_MARK_READ,
 )
 import logging
 from .coordinator import TPLinkRouterCoordinator, collect_mesh_nodes, supports_led_control
@@ -65,6 +67,17 @@ DELETE_RESERVATION_SCHEMA = vol.Schema(
         vol.Required("mac"): vol.All(cv.string, _vol_mac),
     }
 )
+SMS_MESSAGE_SCHEMA = vol.Schema(
+    {
+        vol.Required("device"): cv.string,
+        vol.Required("message_id"): cv.string,
+    }
+)
+CLEAR_SMS_LOG_SCHEMA = vol.Schema(
+    {
+        vol.Required("device"): cv.string,
+    }
+)
 PLATFORMS: list[Platform] = [
     Platform.DEVICE_TRACKER,
     Platform.SENSOR,
@@ -85,6 +98,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     support_vpn = entry.data.get(CONF_SUPPORT_VPN, True)
     support_dhcp_reservations = entry.data.get(CONF_SUPPORT_DHCP_RESERVATIONS, True)
     support_serving_cells = entry.data.get(CONF_SUPPORT_SERVING_CELLS, True)
+    sms_auto_mark_read = entry.data.get(
+        CONF_SMS_AUTO_MARK_READ, DEFAULT_SMS_AUTO_MARK_READ
+    )
 
     try:
         client_class = entry.data.get(CONF_CLIENT_CLASS)
@@ -244,9 +260,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             exc_info=True,
         )
         return False
-    # Create and load the persistent SMS history before the coordinator starts.
-    sms_store = SmsStore(hass, entry.entry_id)
-    await sms_store.async_load()
+    # Create SMS history only for routers that expose an SMS inbox.
+    sms_store = None
+    if hasattr(client, "get_sms") and lte_status is not None:
+        sms_store = SmsStore(hass, entry.entry_id)
+        await sms_store.async_load()
 
     # Create device coordinator and fetch data
     coordinator = TPLinkRouterCoordinator(hass, client, entry.data[CONF_SCAN_INTERVAL], firmware, status,
@@ -261,7 +279,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                           support_dhcp_reservations=support_dhcp_reservations,
                                           mesh_nodes=mesh_nodes,
                                           led_status=led_status,
-                                          sms_store=sms_store)
+                                          sms_store=sms_store,
+                                          sms_auto_mark_read=sms_auto_mark_read)
 
     if sms_list is not None:
         coordinator._process_sms_list(sms_list)
@@ -304,7 +323,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id)
         if not hass.data[DOMAIN]:
-            for svc in ("send_sms", "add_reservation", "delete_reservation"):
+            for svc in (
+                "send_sms",
+                "mark_sms_read",
+                "delete_sms",
+                "clear_sms_log",
+                "add_reservation",
+                "delete_reservation",
+            ):
                 if hass.services.has_service(DOMAIN, svc):
                     hass.services.async_remove(DOMAIN, svc)
     return unload_ok
@@ -317,7 +343,9 @@ async def async_reload_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> 
 def register_services(hass: HomeAssistant, coord: TPLinkRouterCoordinator) -> None:
     dr = device_registry.async_get(hass)
 
-    def _get_coordinator(service: ServiceCall, method_name: str) -> TPLinkRouterCoordinator | None:
+    def _get_coordinator(
+        service: ServiceCall, method_name: str | None = None
+    ) -> TPLinkRouterCoordinator | None:
         device = dr.async_get(service.data.get("device"))
         if device is None:
             _LOGGER.error('TplinkRouter Integration Exception - device was not found')
@@ -328,7 +356,9 @@ def register_services(hass: HomeAssistant, coord: TPLinkRouterCoordinator) -> No
             if not entry or entry.domain != DOMAIN:
                 continue
             coordinator = domain_data.get(key)
-            if coordinator is None or not hasattr(coordinator.router, method_name):
+            if coordinator is None:
+                continue
+            if method_name is not None and not hasattr(coordinator.router, method_name):
                 continue
             if method_name in ("add_ipv4_reservation", "delete_ipv4_reservation") and not getattr(
                 coordinator, "support_dhcp_reservations", True
@@ -336,7 +366,13 @@ def register_services(hass: HomeAssistant, coord: TPLinkRouterCoordinator) -> No
                 continue
             return coordinator
 
-        _LOGGER.error('TplinkRouter Integration Exception - This device does not support %s', method_name)
+        if method_name is None:
+            _LOGGER.error('TplinkRouter Integration Exception - coordinator was not found')
+        else:
+            _LOGGER.error(
+                'TplinkRouter Integration Exception - This device does not support %s',
+                method_name,
+            )
         return None
 
     if hasattr(coord.router, "send_sms") and coord.lte_status is not None:
@@ -351,6 +387,51 @@ def register_services(hass: HomeAssistant, coord: TPLinkRouterCoordinator) -> No
 
         if not hass.services.has_service(DOMAIN, 'send_sms'):
             hass.services.async_register(DOMAIN, 'send_sms', send_sms_service)
+
+    if coord.sms_store is not None:
+        async def clear_sms_log_service(service: ServiceCall) -> None:
+            coordinator = _get_coordinator(service)
+            if coordinator is None or coordinator.sms_store is None:
+                return
+            await coordinator.clear_sms_log()
+
+        if not hass.services.has_service(DOMAIN, 'clear_sms_log'):
+            hass.services.async_register(
+                DOMAIN,
+                'clear_sms_log',
+                clear_sms_log_service,
+                schema=CLEAR_SMS_LOG_SCHEMA,
+            )
+
+    if hasattr(coord.router, "set_sms_read") and coord.sms_store is not None:
+        async def mark_sms_read_service(service: ServiceCall) -> None:
+            coordinator = _get_coordinator(service, "set_sms_read")
+            if coordinator is None:
+                return
+            await coordinator.mark_sms_read(service.data["message_id"])
+
+        if not hass.services.has_service(DOMAIN, 'mark_sms_read'):
+            hass.services.async_register(
+                DOMAIN,
+                'mark_sms_read',
+                mark_sms_read_service,
+                schema=SMS_MESSAGE_SCHEMA,
+            )
+
+    if hasattr(coord.router, "delete_sms") and coord.sms_store is not None:
+        async def delete_sms_service(service: ServiceCall) -> None:
+            coordinator = _get_coordinator(service, "delete_sms")
+            if coordinator is None:
+                return
+            await coordinator.delete_sms(service.data["message_id"])
+
+        if not hass.services.has_service(DOMAIN, 'delete_sms'):
+            hass.services.async_register(
+                DOMAIN,
+                'delete_sms',
+                delete_sms_service,
+                schema=SMS_MESSAGE_SCHEMA,
+            )
 
     if coord.support_dhcp_reservations and hasattr(coord.router, "add_ipv4_reservation"):
         async def add_reservation_service(service: ServiceCall) -> None:

@@ -1,3 +1,4 @@
+
 send_sms:
   fields:
     number:
@@ -49,3 +50,35 @@ delete_reservation:
       required: true
       selector:
         text:
+
+mark_sms_read:
+  fields:
+    device:
+      required: true
+      selector:
+        device:
+          integration: tplink_router
+    message_id:
+      required: true
+      selector:
+        text:
+
+delete_sms:
+  fields:
+    device:
+      required: true
+      selector:
+        device:
+          integration: tplink_router
+    message_id:
+      required: true
+      selector:
+        text:
+
+clear_sms_log:
+  fields:
+    device:
+      required: true
+      selector:
+        device:
+          integration: tplink_router

@@ -890,12 +890,16 @@ class TPLinkRouterSmsLogSensor(SensorEntity):
             return {"messages": []}
 
         messages = self._store.get_messages(limit=25)
-        attributes: dict[str, Any] = {"messages": messages}
+        attributes: dict[str, Any] = {
+            "messages": messages,
+            "auto_mark_read": self.coordinator.sms_auto_mark_read,
+        }
 
         if messages:
             latest = messages[-1]
             attributes.update(
                 {
+                    "last_id": latest["id"],
                     "last_direction": latest["direction"],
                     "last_number": latest["number"],
                     "last_message": latest["message"],

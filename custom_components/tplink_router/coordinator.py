@@ -28,6 +28,7 @@ try:
 except ImportError:  # pragma: no cover - older tplinkrouterc6u without mesh
     MeshNode = Any  # type: ignore[misc, assignment]
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, DeviceInfo
 from .const import (
     DOMAIN,
@@ -36,7 +37,7 @@ from .const import (
     DEFAULT_OFFLINE_TIMEOUT,
 )
 from .utils import safe_call, is_retryable_error
-from .sms_store import SmsStore
+from .sms_store import SmsLogEntry, SmsStore
 
 
 def supports_led_control(router: AbstractRouter) -> bool:
@@ -140,6 +141,7 @@ class TPLinkRouterCoordinator(DataUpdateCoordinator):
             mesh_nodes: list[MeshNode] | None = None,
             led_status: bool | None = None,
             sms_store: SmsStore | None = None,
+            sms_auto_mark_read: bool = True,
     ) -> None:
         self.router = router
         self.unique_id = unique_id
@@ -172,6 +174,7 @@ class TPLinkRouterCoordinator(DataUpdateCoordinator):
         self.reservations: list[IPv4Reservation] | None = reservations
         self.support_dhcp_reservations = support_dhcp_reservations
         self.sms_store = sms_store
+        self.sms_auto_mark_read = sms_auto_mark_read
 
         self.scan_stopped_at: datetime | None = None
         self._last_update_time: datetime | None = None
@@ -298,8 +301,75 @@ class TPLinkRouterCoordinator(DataUpdateCoordinator):
             except Exception:
                 self.logger.exception("TPLink Router failed to store sent SMS")
 
+    async def clear_sms_log(self) -> None:
+        """Clear the Home Assistant SMS history without touching the router inbox."""
+        if self.sms_store is None:
+            raise HomeAssistantError("SMS history is not available for this router")
+        await self.sms_store.async_clear()
+
+    async def mark_sms_read(self, message_id: str) -> None:
+        """Mark a stored incoming SMS as read on the router."""
+        await self._run_stored_sms_action(message_id, "set_sms_read", "mark as read")
+        await self.async_request_refresh()
+
+    async def delete_sms(self, message_id: str) -> None:
+        """Delete a stored incoming SMS from the router inbox only."""
+        await self._run_stored_sms_action(message_id, "delete_sms", "delete")
+        await self.async_request_refresh()
+
+    async def _run_stored_sms_action(
+        self,
+        message_id: str,
+        router_method_name: str,
+        action_name: str,
+    ) -> None:
+        """Locate a stored SMS in the current router inbox and run an action."""
+        if self.sms_store is None:
+            raise HomeAssistantError("SMS history is not available for this router")
+
+        log_entry = self.sms_store.get_message(message_id)
+        if log_entry is None:
+            raise HomeAssistantError(f"SMS log entry {message_id} was not found")
+        if log_entry["direction"] != "in":
+            raise HomeAssistantError("Only received SMS messages exist in the router inbox")
+
+        router_method = getattr(self.router, router_method_name, None)
+        if router_method is None or not hasattr(self.router, "get_sms"):
+            raise HomeAssistantError(f"This router does not support SMS {action_name}")
+
+        def callback() -> bool:
+            sms_list = self.router.get_sms()
+            sms = self._find_router_sms(sms_list, log_entry)
+            if sms is None:
+                return False
+            router_method(sms)
+            return True
+
+        if not await self._run_router_request(callback):
+            raise HomeAssistantError(
+                "The SMS is no longer present in the router's current inbox"
+            )
+
+    @staticmethod
+    def _find_router_sms(sms_list: list[SMS], log_entry: SmsLogEntry) -> SMS | None:
+        """Find the current router SMS represented by a persistent log entry."""
+        router_hash = log_entry.get("router_hash")
+        if router_hash:
+            for sms in sms_list:
+                if TPLinkRouterCoordinator._hash_item(sms) == router_hash:
+                    return sms
+
+        target_timestamp = SmsStore.normalize_timestamp(log_entry["timestamp"])
+        for sms in sms_list:
+            if sms.sender != log_entry["number"] or sms.content != log_entry["message"]:
+                continue
+            if SmsStore.normalize_timestamp(sms.received_at) == target_timestamp:
+                return sms
+
+        return None
+
     async def _async_process_new_sms(self) -> None:
-        """Persist new SMS messages and mark them read after a successful save."""
+        """Persist new SMS messages and optionally mark them read after saving."""
         if not self.new_sms or self.sms_store is None:
             return
 
@@ -309,14 +379,19 @@ class TPLinkRouterCoordinator(DataUpdateCoordinator):
                     "in",
                     sms.sender,
                     sms.content,
-                    sms.received_at.isoformat(),
+                    sms.received_at,
+                    router_hash=self._hash_item(sms),
                 )
             except Exception:
                 # Never mark a message read if we failed to persist it first.
                 self.logger.exception("TPLink Router failed to store received SMS")
                 continue
 
-            if not getattr(sms, "unread", False) or not hasattr(self.router, "set_sms_read"):
+            if (
+                not self.sms_auto_mark_read
+                or not getattr(sms, "unread", False)
+                or not hasattr(self.router, "set_sms_read")
+            ):
                 continue
 
             try:
