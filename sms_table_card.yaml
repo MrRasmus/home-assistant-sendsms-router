@@ -1,0 +1,9 @@
+type: markdown
+title: SMS
+content: |
+  {% set messages = state_attr('sensor.sms_log', 'messages') or [] %}
+  | Tid | | Nummer | Besked |
+  |---|:---:|---|---|
+  {% for sms in messages | reverse %}
+  | {{ sms.timestamp }} | {{ '⬇️' if sms.direction == 'in' else '⬆️' }} | {{ sms.number }} | {{ sms.message | replace('|', '\|') }} |
+  {% endfor %}
