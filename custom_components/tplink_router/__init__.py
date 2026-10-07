@@ -32,6 +32,7 @@ from .const import (
 import logging
 from .coordinator import TPLinkRouterCoordinator, collect_mesh_nodes, supports_led_control
 from .utils import validate_ipv4_address, validate_mac_address
+from .sms_store import SmsStore
 from homeassistant.helpers import device_registry
 
 
@@ -243,6 +244,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             exc_info=True,
         )
         return False
+    # Create and load the persistent SMS history before the coordinator starts.
+    sms_store = SmsStore(hass, entry.entry_id)
+    await sms_store.async_load()
+
     # Create device coordinator and fetch data
     coordinator = TPLinkRouterCoordinator(hass, client, entry.data[CONF_SCAN_INTERVAL], firmware, status,
                                           lte_status, _LOGGER, entry.entry_id, vpn_server_stat, vpn_client_status,
@@ -255,7 +260,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                           reservations=reservations,
                                           support_dhcp_reservations=support_dhcp_reservations,
                                           mesh_nodes=mesh_nodes,
-                                          led_status=led_status)
+                                          led_status=led_status,
+                                          sms_store=sms_store)
 
     if sms_list is not None:
         coordinator._process_sms_list(sms_list)

@@ -36,6 +36,7 @@ from .const import (
     DEFAULT_OFFLINE_TIMEOUT,
 )
 from .utils import safe_call, is_retryable_error
+from .sms_store import SmsStore
 
 
 def supports_led_control(router: AbstractRouter) -> bool:
@@ -138,6 +139,7 @@ class TPLinkRouterCoordinator(DataUpdateCoordinator):
             support_dhcp_reservations: bool = True,
             mesh_nodes: list[MeshNode] | None = None,
             led_status: bool | None = None,
+            sms_store: SmsStore | None = None,
     ) -> None:
         self.router = router
         self.unique_id = unique_id
@@ -169,6 +171,7 @@ class TPLinkRouterCoordinator(DataUpdateCoordinator):
         self.vpn_client_status = vpn_client_status
         self.reservations: list[IPv4Reservation] | None = reservations
         self.support_dhcp_reservations = support_dhcp_reservations
+        self.sms_store = sms_store
 
         self.scan_stopped_at: datetime | None = None
         self._last_update_time: datetime | None = None
@@ -279,10 +282,54 @@ class TPLinkRouterCoordinator(DataUpdateCoordinator):
         await self.async_request_refresh()
 
     async def send_sms(self, number: str, text: str) -> None:
+        """Send an SMS and append successful sends to the persistent log."""
         def callback():
             self.router.send_sms(number, text)
 
         await self._run_router_request(callback)
+
+        if self.sms_store is not None:
+            try:
+                await self.sms_store.async_add_message(
+                    "out",
+                    number,
+                    text,
+                )
+            except Exception:
+                self.logger.exception("TPLink Router failed to store sent SMS")
+
+    async def _async_process_new_sms(self) -> None:
+        """Persist new SMS messages and mark them read after a successful save."""
+        if not self.new_sms or self.sms_store is None:
+            return
+
+        for sms in self.new_sms:
+            try:
+                await self.sms_store.async_add_message(
+                    "in",
+                    sms.sender,
+                    sms.content,
+                    sms.received_at.isoformat(),
+                )
+            except Exception:
+                # Never mark a message read if we failed to persist it first.
+                self.logger.exception("TPLink Router failed to store received SMS")
+                continue
+
+            if not getattr(sms, "unread", False) or not hasattr(self.router, "set_sms_read"):
+                continue
+
+            try:
+                await self._run_router_request(
+                    lambda sms=sms: self.router.set_sms_read(sms)
+                )
+            except Exception:
+                # The SMS is already safe in our local store; a router-side read
+                # failure should not fail the entire coordinator update.
+                self.logger.warning(
+                    "TPLink Router failed to mark received SMS as read",
+                    exc_info=True,
+                )
 
     async def _async_update_data(self):
         """Asynchronous update of all data."""
@@ -339,6 +386,7 @@ class TPLinkRouterCoordinator(DataUpdateCoordinator):
 
                 if sms_list is not None:
                     self._process_sms_list(sms_list)
+                    await self._async_process_new_sms()
                 self._last_update_time = datetime.now()
                 return
             except Exception as error:

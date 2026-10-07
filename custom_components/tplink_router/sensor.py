@@ -691,6 +691,13 @@ async def async_setup_entry(
     if coordinator.reservations is not None:
         sensors.append(TPLinkRouterReservationsSensor(coordinator))
 
+    if (
+        coordinator.sms_store is not None
+        and coordinator.lte_status is not None
+        and hasattr(coordinator.router, "get_sms")
+    ):
+        sensors.append(TPLinkRouterSmsLogSensor(coordinator))
+
     async_add_entities(sensors, False)
 
     tracked: set[int] = set()
@@ -844,6 +851,59 @@ class TPLinkRouterReservationsSensor(CoordinatorEntity[TPLinkRouterCoordinator],
                 for r in self.coordinator.reservations
             ]
         }
+
+
+class TPLinkRouterSmsLogSensor(SensorEntity):
+    """Expose the persistent SMS history for dashboards and automations."""
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+
+    def __init__(self, coordinator: TPLinkRouterCoordinator) -> None:
+        self.coordinator = coordinator
+        self._store = coordinator.sms_store
+        self._attr_device_info = coordinator.device_info
+        self._attr_unique_id = f"{coordinator.unique_id}_{DOMAIN}_sms_log"
+        self.entity_description = SensorEntityDescription(
+            key="sms_log",
+            name="SMS Log",
+            icon="mdi:message-text-outline",
+        )
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to SMS store changes."""
+        await super().async_added_to_hass()
+        if self._store is not None:
+            self.async_on_remove(
+                self._store.async_add_listener(self.async_write_ha_state)
+            )
+
+    @property
+    def native_value(self) -> int:
+        """Return the number of messages retained in the persistent log."""
+        return 0 if self._store is None else self._store.count
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return recent SMS messages for dashboard rendering."""
+        if self._store is None:
+            return {"messages": []}
+
+        messages = self._store.get_messages(limit=25)
+        attributes: dict[str, Any] = {"messages": messages}
+
+        if messages:
+            latest = messages[-1]
+            attributes.update(
+                {
+                    "last_direction": latest["direction"],
+                    "last_number": latest["number"],
+                    "last_message": latest["message"],
+                    "last_timestamp": latest["timestamp"],
+                }
+            )
+
+        return attributes
 
 
 class TPLinkRouterMeshNodeSensor(CoordinatorEntity[TPLinkRouterCoordinator], SensorEntity):
